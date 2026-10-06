@@ -1,9 +1,15 @@
 package review
 
-import "slices"
+import (
+	"slices"
+	"unicode/utf8"
+)
 
 // kindFunc is the symbol kind for functions and methods.
 const kindFunc = "func"
+
+// maxSignature is the length at which outline cuts signatures short.
+const maxSignature = 240
 
 // symbolChanges maps the diff onto the head declarations the caller supplied.
 // A declaration whose body changed only because something nested in it
@@ -18,11 +24,19 @@ func symbolChanges(d FileDiff) []SymbolChange {
 	changes := make([]string, len(d.Symbols))
 	for i, s := range d.Symbols {
 		switch {
-		case d.Status == Added || lines.all(s.StartLine, s.EndLine):
+		case d.Status == Added:
 			changes[i] = SymbolAdded
-		case lines.added[s.StartLine]:
+		case !lines.any(s.StartLine, s.EndLine):
+		case d.BaseSymbols != nil && wholeInSignature(s) && inBase(d, s, true):
+			// Unchanged apart from spacing or comments, as when gofmt
+			// realigns a block.
+		case d.BaseSymbols != nil && inBase(d, s, true):
+			changes[i] = SymbolBody
+		case lines.all(s.StartLine, s.EndLine) && (d.BaseSymbols == nil || !inBase(d, s, false)):
+			changes[i] = SymbolAdded
+		case lines.added[s.StartLine] || lines.all(s.StartLine, s.EndLine):
 			changes[i] = SymbolSignature
-		case lines.any(s.StartLine, s.EndLine):
+		default:
 			changes[i] = SymbolBody
 		}
 	}
@@ -41,6 +55,35 @@ func symbolChanges(d FileDiff) []SymbolChange {
 		out = append(out, SymbolChange{Name: s.Name, Kind: s.Kind, Exported: s.Exported, Change: changes[i]})
 	}
 	return out
+}
+
+// inBase reports whether base declares s: with sameSignature, one with the
+// same qualified name, kind and signature; otherwise as many of that name
+// and kind as head does, so s is not an extra one.
+func inBase(d FileDiff, s Symbol, sameSignature bool) bool {
+	same := func(o Symbol) bool { return o.Name == s.Name && o.Qualified == s.Qualified && o.Kind == s.Kind }
+	if sameSignature {
+		// Truncation backs up to a UTF-8 boundary, so a cut can be shorter
+		// than the byte limit. Equal prefixes don't establish equality.
+		return s.Signature != "" && len(s.Signature) <= maxSignature-utf8.UTFMax &&
+			slices.ContainsFunc(d.BaseSymbols, func(o Symbol) bool { return same(o) && o.Signature == s.Signature })
+	}
+	count := func(syms []Symbol) int {
+		n := 0
+		for _, o := range syms {
+			if same(o) {
+				n++
+			}
+		}
+		return n
+	}
+	return count(d.BaseSymbols) >= count(d.Symbols)
+}
+
+// wholeInSignature reports whether s's signature holds all of it: a one-line
+// constant or variable, whose signature includes its value.
+func wholeInSignature(s Symbol) bool {
+	return (s.Kind == "const" || s.Kind == "var") && s.StartLine == s.EndLine
 }
 
 func containsChanged(syms []Symbol, changes []string, i int) bool {

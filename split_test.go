@@ -61,20 +61,20 @@ func monorepo(t *testing.T) *Overview {
 		"packages/core/src/types.ts",
 		"packages/core/test/source.test.ts",
 		"packages/cli/test/cmd0.test.ts",
-		"plans/local.md",
+		"local.ts",
 	)
 	// Distinct sizes, so no directory looks like one edit repeated.
 	var diffs []FileDiff
 	o := &Overview{}
-	o.Commits = []Commit{{Subject: "Serve local reviews"}}
 	for i, p := range paths {
 		diffs = append(diffs, mod(p, i+1, 0))
-		o.Commits[0].Files = append(o.Commits[0].Files, CommitFile{Path: p, Additions: i + 1})
+		if p != "packages/core/src/source.ts" {
+			o.Links = append(o.Links, Link{From: p, To: "packages/core/src/source.ts"})
+		}
 	}
 	for _, f := range analyzed(t, diffs...).Files {
 		o.Add(f)
 	}
-	o.Commits = append(o.Commits, Commit{Subject: "Unrelated", Files: []CommitFile{{Path: "elsewhere.go", Additions: 1}}})
 	return o
 }
 
@@ -82,7 +82,7 @@ func TestSplitLargeGroup(t *testing.T) {
 	o := monorepo(t)
 	o.Group()
 	g := o.Groups[0]
-	if g.Title != "Serve local reviews" || len(g.Children) != 4 {
+	if len(g.Children) != 4 {
 		t.Fatalf("group = %+v", g)
 	}
 	byTitle := map[string][]string{}
@@ -98,7 +98,7 @@ func TestSplitLargeGroup(t *testing.T) {
 	if fs := byTitle["Changes in packages/cli/ and tests"]; !slices.Contains(fs, "packages/cli/test/cmd0.test.ts") {
 		t.Errorf("cli part = %q", fs)
 	}
-	if fs := byTitle["Other files"]; !slices.Equal(fs, []string{"plans/local.md"}) {
+	if fs := byTitle["Other files"]; !slices.Equal(fs, []string{"local.ts"}) {
 		t.Errorf("other part = %q", fs)
 	}
 	if last := g.Children[len(g.Children)-1]; last.Title != "Other files" {

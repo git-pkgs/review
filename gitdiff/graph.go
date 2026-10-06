@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -32,26 +33,49 @@ var linkRelations = map[string]bool{
 	outline.RelLoads:      true,
 }
 
-// headGraph builds an outline graph of the head tree from a copy written out
-// of the committed blobs, so the working tree's state, its filters and any
-// untracked files never affect the result.
-func (g gitRunner) headGraph(ctx context.Context, headRev string) (*outline.Graph, error) {
+// contextFiles are files outline reads to resolve imports between changed
+// files in other directories: a Go module's path, and Python packages that
+// can re-export a module's names.
+var contextFiles = map[string]bool{"go.mod": true, "__init__.py": true}
+
+// graph builds an outline graph of the changed files at rev, written out of
+// the committed blobs so the working tree never affects it. Links only join
+// changed files, so the rest of the tree is left out apart from
+// contextFiles: parsing all of it is slow, and under that load outline's
+// parse timeout drops files.
+func (g gitRunner) graph(ctx context.Context, rev string, changed []string) (*outline.Graph, error) {
 	tmp, err := os.MkdirTemp("", "review-head-*")
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
-	if err := g.extract(ctx, headRev, tmp); err != nil {
+	if err := g.extract(ctx, rev, tmp, graphFiles(changed)); err != nil {
 		return nil, err
 	}
 	return outline.Build(tmp, outline.Options{})
 }
 
-// extract writes the regular files of rev into dir exactly as stored: no
-// checkout filters, line-ending conversion or export attributes apply, and
-// paths are from the repository root wherever git runs. Symlinks and
-// submodules are left out.
-func (g gitRunner) extract(ctx context.Context, rev, dir string) error {
+// graphFiles selects the changed paths and the contextFiles in their
+// directories and every parent directory.
+func graphFiles(changed []string) func(string) bool {
+	files := map[string]bool{}
+	dirs := map[string]bool{}
+	for _, p := range changed {
+		files[p] = true
+		for d := path.Dir(p); !dirs[d]; d = path.Dir(d) {
+			dirs[d] = true
+		}
+	}
+	return func(name string) bool {
+		return files[name] || (contextFiles[path.Base(name)] && dirs[path.Dir(name)])
+	}
+}
+
+// extract writes the regular files of rev that keep selects into dir exactly
+// as stored: no checkout filters, line-ending conversion or export attributes
+// apply, and paths are from the repository root wherever git runs. Symlinks
+// and submodules are left out.
+func (g gitRunner) extract(ctx context.Context, rev, dir string, keep func(string) bool) error {
 	listing, err := g.run(ctx, "ls-tree", "-r", "-z", "--full-tree", rev)
 	if err != nil {
 		return err
@@ -64,18 +88,18 @@ func (g gitRunner) extract(ctx context.Context, rev, dir string) error {
 	if err != nil {
 		return errors.Join(err, blobs.close())
 	}
-	err = writeTree(string(listing), blobs, root)
+	err = writeTree(string(listing), blobs, root, keep)
 	return errors.Join(err, root.Close(), blobs.close())
 }
 
-// writeTree writes each regular blob in an ls-tree -z listing, whose entries
-// are "<mode> <type> <oid>\t<path>".
-func writeTree(listing string, blobs *blobReader, root *os.Root) error {
+// writeTree writes each regular blob that keep selects from an ls-tree -z
+// listing, whose entries are "<mode> <type> <oid>\t<path>".
+func writeTree(listing string, blobs *blobReader, root *os.Root, keep func(string) bool) error {
 	const dirPerm = 0o755
 	for entry := range strings.SplitSeq(listing, "\x00") {
 		meta, name, ok := strings.Cut(entry, "\t")
 		fields := strings.Fields(meta)
-		if !ok || len(fields) != 3 || fields[1] != "blob" || (fields[0] != modeRegular && fields[0] != modeExecutable) {
+		if !ok || len(fields) != 3 || fields[1] != "blob" || (fields[0] != modeRegular && fields[0] != modeExecutable) || !keep(name) {
 			continue
 		}
 		local := filepath.FromSlash(name)
@@ -93,9 +117,66 @@ func writeTree(listing string, blobs *blobReader, root *os.Root) error {
 	return nil
 }
 
+// addGraphs fills in each changed file's declarations and the links between
+// files from a graph of the head commit, then each modified file's base
+// declarations from a graph of the base commit. A graph that can't be built
+// leaves a warning rather than an error.
+func (g gitRunner) addGraphs(ctx context.Context, o *review.Overview, rng review.Range, diffs []review.FileDiff) {
+	byPath := make(map[string]*review.FileDiff, len(diffs))
+	changed := make([]string, 0, len(diffs))
+	for i := range diffs {
+		byPath[diffs[i].Path] = &diffs[i]
+		changed = append(changed, diffs[i].Path)
+	}
+	head, err := g.graph(ctx, rng.HeadRev, changed)
+	if err != nil {
+		o.Warnings = append(o.Warnings, "no code graph, so files are grouped without links: "+err.Error())
+		return
+	}
+	for _, w := range head.Warnings {
+		o.Warnings = append(o.Warnings, "code graph: "+w)
+	}
+	var rewritten []int
+	var old []string
+	for i := range diffs {
+		d := &diffs[i]
+		if d.Head != nil && d.Head.Complete {
+			d.Symbols = fileSymbols(head, d.Path, d.Head.Data)
+		}
+		if d.Symbols != nil && d.Status != review.Added && d.Base != nil && d.Base.Complete {
+			rewritten = append(rewritten, i)
+			old = append(old, basePath(d))
+		}
+	}
+	o.Links = links(head, byPath)
+	if len(old) == 0 {
+		return
+	}
+	base, err := g.graph(ctx, rng.BaseRev, old)
+	if err != nil {
+		o.Warnings = append(o.Warnings, "no base code graph, so rewritten declarations may read as added: "+err.Error())
+		return
+	}
+	for _, w := range base.Warnings {
+		o.Warnings = append(o.Warnings, "base code graph: "+w)
+	}
+	for _, i := range rewritten {
+		d := &diffs[i]
+		// Empty rather than nil: a base without declarations was still read.
+		d.BaseSymbols = append([]review.Symbol{}, fileSymbols(base, basePath(d), d.Base.Data)...)
+	}
+}
+
+func basePath(d *review.FileDiff) string {
+	if d.OldPath != "" {
+		return d.OldPath
+	}
+	return d.Path
+}
+
 // fileSymbols returns the declarations graph g records for path, with line
-// ranges computed from the file's head contents.
-func fileSymbols(g *outline.Graph, path string, head []byte) []review.Symbol {
+// ranges computed from the file's contents in that version.
+func fileSymbols(g *outline.Graph, path string, src []byte) []review.Symbol {
 	var syms []review.Symbol
 	for _, n := range g.Nodes {
 		if n.File != path || !symbolKinds[n.Kind] || n.Line == 0 {
@@ -103,9 +184,11 @@ func fileSymbols(g *outline.Graph, path string, head []byte) []review.Symbol {
 		}
 		syms = append(syms, review.Symbol{
 			Name:      n.Name,
+			Qualified: n.Qualified,
 			Kind:      n.Kind,
+			Signature: n.Sig,
 			StartLine: n.Line,
-			EndLine:   max(n.Line, lineAt(head, n.End)),
+			EndLine:   max(n.Line, lineAt(src, n.End)),
 			Exported:  n.Exported,
 		})
 	}

@@ -181,14 +181,7 @@ func showGroup(ctx context.Context, src *source, o *review.Overview, group revie
 		}
 		return gitdiff.Diff(ctx, src.dir, *o.Range, paths, w)
 	}
-	_, err := review.ReadPatchSections(bytes.NewReader(patch), func(d review.FileDiff, section string) error {
-		if !slices.Contains(group.Files, d.Path) {
-			return nil
-		}
-		_, err := io.WriteString(w, section)
-		return err
-	})
-	return err
+	return review.WritePatchFiles(w, bytes.NewReader(patch), group.Files)
 }
 
 // read returns the patch bytes when the source is a patch. Reading stdin

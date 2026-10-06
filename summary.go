@@ -13,10 +13,9 @@ import (
 )
 
 const (
-	maxNames        = 6
-	maxQuoted       = 3
-	maxRoleEntries  = 8
-	focusedDocsSize = 10
+	maxNames       = 6
+	maxQuoted      = 3
+	maxRoleEntries = 8
 )
 
 // changeSummary describes a group of code changes in sentences built from
@@ -293,33 +292,6 @@ func quotedList(items []string) string {
 		s += fmt.Sprintf(" (and %d more)", len(items)-maxQuoted)
 	}
 	return s
-}
-
-// docsSummary points at documentation changed by the same focused commits.
-func (g *grouper) docsSummary(files, docs []*File) []string {
-	in := map[string]bool{}
-	for _, f := range files {
-		in[f.Path] = true
-	}
-	isDoc := map[string]bool{}
-	for _, d := range docs {
-		isDoc[d.Path] = true
-	}
-	var found []string
-	for _, c := range g.o.Commits {
-		if len(c.Files) > focusedDocsSize || !slices.ContainsFunc(c.Files, func(cf CommitFile) bool { return in[cf.Path] }) {
-			continue
-		}
-		for _, cf := range c.Files {
-			if isDoc[cf.Path] && !slices.Contains(found, cf.Path) {
-				found = append(found, cf.Path)
-			}
-		}
-	}
-	if len(found) == 0 {
-		return nil
-	}
-	return []string{"Documented in " + nameList(found) + "."}
 }
 
 func roleSummary(files []*File) []string {

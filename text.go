@@ -12,8 +12,6 @@ const (
 	maxSurfaceLines = 20
 	maxContextWidth = 60
 	shortRevLen     = 12
-	shortSHALen     = 7
-	maxCommitLines  = 10
 	wrapWidth       = 88
 )
 
@@ -52,7 +50,6 @@ func (o *Overview) Text(w io.Writer) error { return o.Render(w, TextOptions{}) }
 func (o *Overview) Render(w io.Writer, opts TextOptions) error {
 	r := &renderer{w: w, md: opts.Markdown, decls: opts.Declarations, o: o}
 	r.header()
-	r.commits()
 	for _, sec := range sectionTitles {
 		var groups []Group
 		for _, g := range o.Groups {
@@ -106,10 +103,7 @@ func (r *renderer) para(text string) {
 func (r *renderer) header() {
 	o := r.o
 	title := "Changes"
-	switch {
-	case len(o.Commits) == 1:
-		title = o.Commits[0].Subject
-	case o.Branch != "":
+	if o.Branch != "" {
 		title = "Branch " + o.Branch
 	}
 	if r.md {
@@ -125,40 +119,8 @@ func (r *renderer) header() {
 		}
 		facts = append(facts, fmt.Sprintf("%s%s%s (%s..%s)", rng.Base, sep, rng.Head, short(rng.BaseRev), short(rng.HeadRev)))
 	}
-	if len(o.Commits) > 0 {
-		facts = append(facts, plural(len(o.Commits), "commit"))
-	}
 	facts = append(facts, plural(len(o.Files), "file"), fmt.Sprintf("+%d -%d", o.Additions, o.Deletions))
 	r.printf("%s\n", strings.Join(facts, ", "))
-}
-
-func (r *renderer) commits() {
-	if len(r.o.Commits) <= 1 {
-		return
-	}
-	r.heading("Commits")
-	for i, c := range r.o.Commits {
-		if i == maxCommitLines {
-			r.printf("%sand %d more\n", r.bullet(), len(r.o.Commits)-i)
-			break
-		}
-		sha := c.SHA
-		if len(sha) > shortSHALen {
-			sha = sha[:shortSHALen]
-		}
-		if r.md {
-			r.printf("- %s `%s`\n", c.Subject, sha)
-		} else {
-			r.printf("  %s %s\n", sha, c.Subject)
-		}
-	}
-}
-
-func (r *renderer) bullet() string {
-	if r.md {
-		return "- "
-	}
-	return "  "
 }
 
 func (r *renderer) group(g Group) {

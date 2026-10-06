@@ -308,31 +308,15 @@ diff --git a/README.md b/README.md
 -x
 +y
 `
-	o, err := FromPatch(strings.NewReader(patch))
-	if err != nil {
-		t.Fatal(err)
+	if _, err := FromPatch(strings.NewReader(patch)); err == nil || !strings.Contains(err.Error(), "git diff base...HEAD") {
+		t.Fatalf("series error = %v", err)
 	}
-	if len(o.Commits) != 2 {
-		t.Fatalf("commits = %+v", o.Commits)
+	if _, err := ReadPatch(strings.NewReader(patch), func(FileDiff) error { return nil }); err == nil {
+		t.Fatal("ReadPatch accepted a series")
 	}
-	first := o.Commits[0]
-	if first.SHA != strings.Repeat("1", 40) || first.Subject != "Add strict parsing to the parser" || first.Body != "Strict mode rejects trailing input." {
-		t.Errorf("first commit = %+v", first)
-	}
-	if len(first.Files) != 1 || first.Files[0] != (CommitFile{Path: "a.go", Additions: 1, Deletions: 1}) {
-		t.Errorf("first commit files = %+v", first.Files)
-	}
-	if o.Commits[1].Subject != "Document strict mode" || len(o.Commits[1].Files) != 2 {
-		t.Errorf("second commit = %+v", o.Commits[1])
-	}
-	if len(o.Files) != 2 {
-		t.Fatalf("files = %+v", o.Files)
-	}
-	if a := o.Files[0]; a.Path != "a.go" || a.Additions != 2 || a.Deletions != 1 || a.Hunks != 2 {
-		t.Errorf("merged a.go = %+v", a)
-	}
-	if o.Groups[0].Title != "Add strict parsing to the parser" {
-		t.Errorf("groups = %+v", o.Groups)
+	var buf bytes.Buffer
+	if err := WritePatchFiles(&buf, strings.NewReader(patch), []string{"a.go"}); err == nil || buf.Len() != 0 {
+		t.Fatalf("WritePatchFiles: error %v, output %q", err, buf.String())
 	}
 }
 
@@ -376,37 +360,5 @@ func TestReadPatchSectionsPlainDiff(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != input[len("Only in a: x\n"):] {
 		t.Errorf("sections = %q", got)
-	}
-}
-
-func TestMergeDiffs(t *testing.T) {
-	add := FileDiff{Path: "a.go", Status: Added, NewMode: "100644", Head: &Content{Data: []byte("x\n"), Complete: true}}
-	mod := FileDiff{Path: "a.go", Status: Modified, OldMode: "100644", NewMode: "100755"}
-	del := FileDiff{Path: "a.go", Status: Deleted, OldMode: "100644", Base: &Content{Data: []byte("x\n"), Complete: true}}
-	ren := FileDiff{Path: "a.go", OldPath: "old.go", Status: Renamed, OldMode: "100644", NewMode: "100644"}
-	tests := []struct {
-		name       string
-		a, b       FileDiff
-		status     string
-		old, new   string
-		keepsOldAs string
-	}{
-		{"deleted then recreated", del, add, Modified, "100644", "100644", ""},
-		{"added then changed", add, mod, Added, "", "100755", ""},
-		{"changed then deleted", mod, del, Deleted, "100644", "", ""},
-		{"added then deleted", add, del, "", "", "", ""},
-		{"renamed then changed", ren, mod, Renamed, "100644", "100755", "old.go"},
-		{"changed twice", mod, mod, Modified, "100644", "100755", ""},
-	}
-	for _, tt := range tests {
-		m := mergeDiffs(tt.a, tt.b)
-		if m.Status != tt.status || m.OldMode != tt.old || m.NewMode != tt.new || m.OldPath != tt.keepsOldAs {
-			t.Errorf("%s: %+v", tt.name, m)
-		}
-	}
-	// Added, deleted, then added again: the file is new, with the last contents.
-	readded := mergeDiffs(mergeDiffs(add, del), add)
-	if readded.Status != Added || readded.Head == nil || string(readded.Head.Data) != "x\n" {
-		t.Errorf("re-added = %+v", readded)
 	}
 }

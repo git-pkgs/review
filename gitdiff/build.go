@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 
 	"github.com/git-pkgs/review"
@@ -67,8 +66,16 @@ var statusNames = map[byte]string{
 // Build analyses and groups the range selected by opts in the repository at
 // dir. Declarations and links between files come from an outline graph of
 // the head tree; if that graph can't be built the overview carries a warning
-// and is grouped without it.
+// and is grouped without it. If ctx ends, Build returns ctx.Err().
 func Build(ctx context.Context, dir string, opts Options) (*review.Overview, error) {
+	o, err := build(ctx, dir, opts)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return o, err
+}
+
+func build(ctx context.Context, dir string, opts Options) (*review.Overview, error) {
 	git := gitRunner{dir: dir}
 	rng, err := resolveRange(ctx, git, opts)
 	if err != nil {
@@ -79,26 +86,9 @@ func Build(ctx context.Context, dir string, opts Options) (*review.Overview, err
 		return nil, err
 	}
 	o := &review.Overview{Range: &rng, Files: make([]review.File, 0, len(diffs)), Branch: git.branch(ctx, rng.Head)}
-	if o.Commits, err = git.commits(ctx, rng.BaseRev, rng.HeadRev); err != nil {
-		return nil, err
-	}
 
-	byPath := make(map[string]*review.FileDiff, len(diffs))
-	for i := range diffs {
-		byPath[diffs[i].Path] = &diffs[i]
-	}
 	if len(diffs) > 0 {
-		graph, err := git.headGraph(ctx, rng.HeadRev)
-		if err != nil {
-			o.Warnings = append(o.Warnings, "no code graph, so files are grouped without links: "+err.Error())
-		} else {
-			for i := range diffs {
-				if d := &diffs[i]; d.Head != nil && d.Head.Complete {
-					d.Symbols = fileSymbols(graph, d.Path, d.Head.Data)
-				}
-			}
-			o.Links = links(graph, byPath)
-		}
+		git.addGraphs(ctx, o, rng, diffs)
 	}
 
 	for _, d := range diffs {
@@ -114,6 +104,11 @@ func Build(ctx context.Context, dir string, opts Options) (*review.Overview, err
 
 // fileDiffs reads every changed file with both sides' contents.
 func (g gitRunner) fileDiffs(ctx context.Context, rng review.Range) ([]review.FileDiff, error) {
+	g, cleanup, err := g.diffRepository(ctx, rng.HeadRev)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
 	raw, err := g.rawChanges(ctx, rng.BaseRev, rng.HeadRev)
 	if err != nil {
 		return nil, err
@@ -230,17 +225,27 @@ func (b *blobReader) content(oid string) (*review.Content, error) {
 // Diff writes git's patch for paths between the two commits of rng. Paths are
 // relative to the repository root, as in an overview, wherever dir is.
 func Diff(ctx context.Context, dir string, rng review.Range, paths []string, w io.Writer) error {
+	git, cleanup, err := (gitRunner{dir: dir}).diffRepository(ctx, rng.HeadRev)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+	defer cleanup()
 	args := append([]string{gitDiff}, diffFlags...)
 	args = append(args, rng.BaseRev, rng.HeadRev, "--")
 	for _, p := range paths {
 		args = append(args, rootPathspec(p))
 	}
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
+	cmd := git.command(ctx, args...)
 	cmd.Stdout = w
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("git diff: %s", strings.TrimSpace(stderr.String()))
 	}
 	return nil

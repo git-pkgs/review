@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/git-pkgs/review"
 	"github.com/git-pkgs/review/internal/gittest"
 )
 
@@ -91,24 +90,5 @@ func TestHunksByPath(t *testing.T) {
 	}
 	if len(byPath["new.go"]) != 1 || len(byPath["old.go"]) != 0 {
 		t.Errorf("rename hunks = %+v", byPath)
-	}
-}
-
-func TestParseCommits(t *testing.T) {
-	out := "\x1e" + strings.Repeat("a", 40) + "\x1fAdd parser\x1fLonger\nbody\n\x1f\x00\n3\t1\tsrc/a.go\x00-\t-\tlogo.png\x00" +
-		"\x1e" + strings.Repeat("b", 40) + "\x1fEmpty commit\x1f\x1f"
-	commits := parseCommits(out)
-	if len(commits) != 2 {
-		t.Fatalf("commits = %+v", commits)
-	}
-	c := commits[0]
-	if c.Subject != "Add parser" || c.Body != "Longer\nbody" || len(c.Files) != 2 {
-		t.Errorf("first = %+v", c)
-	}
-	if c.Files[0] != (review.CommitFile{Path: "src/a.go", Additions: 3, Deletions: 1}) || c.Files[1].Path != "logo.png" {
-		t.Errorf("files = %+v", c.Files)
-	}
-	if commits[1].Subject != "Empty commit" || len(commits[1].Files) != 0 {
-		t.Errorf("second = %+v", commits[1])
 	}
 }

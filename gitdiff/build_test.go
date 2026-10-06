@@ -3,6 +3,8 @@ package gitdiff
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -221,12 +223,13 @@ func TestOverviewText(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"feature\nmain...HEAD (",
-		"), 1 commit, 10 files, +18 -7\n",
+		"), 10 files, +18 -7\n",
 		"1. Changes to added.go, gone.go and 1 other file  (3 files, +9 -4)\n" +
 			"   Adds added.go. Deletes gone.go. Adds type `Thing`, and function `Added`. Changes the\n" +
 			"   body of function `Serve`. Removes `func Gone() {}`. No test files changed.\n",
 		"2. Changes to parser.go and tests  (2 files, +6 -1)\n" +
-			"   Adds parser_test.go. Changes the declaration of function `Parse`. Includes 1 test\n   file.\n",
+			"   Adds parser_test.go. Changes the declaration of function `Parse`. Includes 1 test\n" +
+			"   file.\n",
 		"3. Documentation  (1 file, +1 -1)\n   Changes docs/guide.md (## Install).\n",
 		"4. Renamed without changes  (1 file)\n",
 		"5. Binary, generated and vendored files  (3 files, +2 -1)\n" +
@@ -291,26 +294,16 @@ func TestBuildLinksFromGraph(t *testing.T) {
 	}
 }
 
-func TestBuildCommitsAndBranch(t *testing.T) {
+func TestBuildBranchWithoutCommitHistory(t *testing.T) {
 	r := moduleRepo(t)
-	r.Write("cli/main.go", "package main\n\nfunc main() {\n\tprintln(3)\n\tprintln(4)\n\tprintln(5)\n}\n")
+	r.Write("cli/main.go", "package main\n\nfunc main() {\n\tprintln(3)\n\tprintln(4)\n}\n")
 	r.Commit("Print more")
 	o, err := Build(context.Background(), r.Dir, Options{Base: "main", MergeBase: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o.Branch != "feature" || len(o.Commits) != 2 {
+	if o.Branch != "feature" || len(o.Commits) != 0 {
 		t.Fatalf("branch %q, commits %+v", o.Branch, o.Commits)
-	}
-	if c := o.Commits[1]; c.Subject != "Print more" || len(c.Files) != 1 || c.Files[0].Path != "cli/main.go" {
-		t.Errorf("second commit = %+v", c)
-	}
-	titles := []string{}
-	for _, g := range o.Groups {
-		titles = append(titles, g.Title)
-	}
-	if !slices.Equal(titles, []string{"Make Load strict", "Print more"}) {
-		t.Errorf("titles = %q", titles)
 	}
 }
 
@@ -326,6 +319,11 @@ func TestDiff(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "+\tprintln(2)") || strings.Contains(buf.String(), "lib/store.go") {
 		t.Errorf("diff = %s", buf.String())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := Diff(ctx, r.Dir, *o.Range, nil, io.Discard); !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled diff: err = %v", err)
 	}
 }
 
@@ -539,5 +537,53 @@ func TestBuildGraphIgnoresCleanFilters(t *testing.T) {
 	}
 	if !slices.Contains(o.Links, review.Link{From: "api/handler.go", To: "lib/store.go"}) {
 		t.Errorf("links with a filtered clean worktree = %+v", o.Links)
+	}
+}
+
+func TestGraphFiles(t *testing.T) {
+	keep := graphFiles([]string{"pkg/sub/mod.py", "cmd/tool/main.go"})
+	for name, want := range map[string]bool{
+		"pkg/sub/mod.py":      true,
+		"cmd/tool/main.go":    true,
+		"go.mod":              true,
+		"cmd/go.mod":          true,
+		"pkg/__init__.py":     true,
+		"pkg/sub/__init__.py": true,
+		"__init__.py":         true,
+		"pkg/sub/other.py":    false,
+		"cmd/tool/flags.go":   false,
+		"lib/go.mod":          false,
+		"lib/__init__.py":     false,
+	} {
+		if got := keep(name); got != want {
+			t.Errorf("keep(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestBuildGraphsOnlyChangedFiles(t *testing.T) {
+	r := gittest.New(t)
+	huge := "package p\n\n// " + strings.Repeat("x", 1<<20) + "\n"
+	r.Write("generated.go", huge)
+	r.Write("p.go", "package p\n\nfunc P() {}\n")
+	r.Commit("base")
+	r.Write("p.go", "package p\n\nfunc P() { println() }\n")
+	r.Commit("change p")
+	o, err := Build(context.Background(), r.Dir, Options{Base: "HEAD~1", Head: "HEAD"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(o.Warnings) > 0 {
+		t.Errorf("unchanged file reached the graph: %q", o.Warnings)
+	}
+
+	r.Write("generated.go", huge+"// more\n")
+	r.Commit("regenerate")
+	o, err = Build(context.Background(), r.Dir, Options{Base: "HEAD~1", Head: "HEAD"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(o.Warnings, "code graph: generated.go: too-large") {
+		t.Errorf("warnings = %q", o.Warnings)
 	}
 }

@@ -23,33 +23,20 @@ const (
 	permDigits = 3
 )
 
-// FromPatch analyses and groups every file in a unified diff. A file that
-// appears more than once, as in a git format-patch series, is reported once
-// with its changes combined; one created and deleted within the series is
-// left out, since it exists at neither end.
+var errPatchSeries = errors.New("patch series are not supported; supply a single net diff with git diff base...HEAD")
+
+// FromPatch analyses and groups a single unified diff between two trees.
 func FromPatch(r io.Reader) (*Overview, error) {
-	var diffs []FileDiff
-	seen := map[string]int{}
-	commits, err := ReadPatch(r, func(d FileDiff) error {
-		if i, ok := seen[d.Path]; ok {
-			diffs[i] = mergeDiffs(diffs[i], d)
-			return nil
-		}
-		seen[d.Path] = len(diffs)
-		diffs = append(diffs, d)
-		return nil
-	})
+	files, err := readNetPatch(r, false)
 	if err != nil {
 		return nil, err
 	}
-	o := &Overview{Files: []File{}, Commits: commits}
-	for _, d := range diffs {
-		if d.Status == "" {
-			continue
-		}
-		f, err := Analyze(d)
+	slices.SortFunc(files, func(a, b patchFile) int { return strings.Compare(a.d.Path, b.d.Path) })
+	o := &Overview{Files: []File{}}
+	for _, pf := range files {
+		f, err := Analyze(pf.d)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", d.Path, err)
+			return nil, fmt.Errorf("%s: %w", pf.d.Path, err)
 		}
 		o.Add(f)
 	}
@@ -57,45 +44,63 @@ func FromPatch(r io.Reader) (*Overview, error) {
 	return o, nil
 }
 
-// mergeDiffs combines two diffs of one path from successive patches. The
-// combined status follows whether the file existed before the first patch and
-// after the second, the old mode comes from the first and the new mode from
-// the second, and contents are kept only for a file the second patch added
-// whole. A file that exists at neither end gets an empty status.
-func mergeDiffs(a, b FileDiff) FileDiff {
-	before := a.Status != Added && a.Status != ""
-	after := b.Status != Deleted
-	m := a
-	m.Additions += b.Additions
-	m.Deletions += b.Deletions
-	m.Binary = a.Binary || b.Binary
-	m.Hunks = append(slices.Clone(a.Hunks), b.Hunks...)
-	m.NewMode = b.NewMode
-	m.Symlink = b.Symlink
-	m.Submodule = b.Submodule
-	m.Base, m.Head = nil, nil
-	switch {
-	case !before && after:
-		m.Status = Added
-		if b.Status == Added {
-			m.Head = b.Head
-		}
-	case before && !after:
-		m.Status, m.NewMode = Deleted, ""
-	case before && after:
-		if a.Status != Renamed && a.Status != Copied {
-			m.Status = Modified
-		}
-	default:
-		m.Status = ""
+// WritePatchFiles copies each selected file's sections exactly as written.
+// Paths use the names FromPatch reports, including the new names of renames.
+func WritePatchFiles(w io.Writer, r io.Reader, paths []string) error {
+	files, err := readNetPatch(r, true)
+	if err != nil {
+		return err
 	}
-	return m
+	for _, pf := range files {
+		if slices.Contains(paths, pf.d.Path) {
+			if _, err := io.WriteString(w, pf.section); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
-// ReadPatch parses a unified diff as written by git diff, git format-patch or
-// diff -u, calling visit once per file, and returns the commits described by
-// any format-patch headers. Added and deleted files carry their full
-// contents, since the diff holds every line; other files carry none.
+type patchFile struct {
+	d       FileDiff
+	section string
+}
+
+func readNetPatch(r io.Reader, capture bool) ([]patchFile, error) {
+	var files []patchFile
+	seen := map[string]int{}
+	_, err := readPatch(r, capture, func(d FileDiff, section string) error {
+		if i, ok := seen[d.Path]; ok {
+			prev := &files[i]
+			// Git writes a file type change as a deletion and an addition.
+			if prev.d.Status != Deleted || d.Status != Added || prev.d.OldMode == "" || d.NewMode == "" || fileType(prev.d.OldMode) == fileType(d.NewMode) {
+				return fmt.Errorf("%s: %w", d.Path, errPatchSeries)
+			}
+			d.Status = TypeChanged
+			d.OldMode, d.Base = prev.d.OldMode, prev.d.Base
+			d.Deletions += prev.d.Deletions
+			d.Hunks = append(prev.d.Hunks, d.Hunks...)
+			d.Binary = d.Binary || prev.d.Binary
+			d.Symlink = d.Symlink || prev.d.Symlink
+			d.Submodule = d.Submodule || prev.d.Submodule
+			prev.d = d
+			prev.section += section
+			return nil
+		}
+		seen[d.Path] = len(files)
+		files = append(files, patchFile{d: d, section: section})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+// ReadPatch parses a single diff as written by git diff, git format-patch or
+// diff -u, calling visit once per section, and returns optional format-patch
+// metadata. Patch series are rejected. Added and deleted files carry their
+// full contents, since the diff holds every line; other files carry none.
 func ReadPatch(r io.Reader, visit func(FileDiff) error) ([]Commit, error) {
 	return readPatch(r, false, func(d FileDiff, _ string) error { return visit(d) })
 }
@@ -110,6 +115,9 @@ func readPatch(r io.Reader, capture bool, visit func(FileDiff, string) error) ([
 	p := &patchReader{r: bufio.NewReaderSize(r, readBufferSize), capture: capture}
 	for {
 		d, err := p.next()
+		if len(p.commits) > 1 {
+			return nil, errPatchSeries
+		}
 		if errors.Is(err, io.EOF) {
 			return p.commits, nil
 		}
@@ -117,7 +125,11 @@ func readPatch(r io.Reader, capture bool, visit func(FileDiff, string) error) ([
 			return nil, fmt.Errorf("line %d: %w", p.line, err)
 		}
 		if n := len(p.commits); n > 0 {
-			p.commits[n-1].Files = append(p.commits[n-1].Files, CommitFile{Path: d.Path, Additions: d.Additions, Deletions: d.Deletions})
+			cf := CommitFile{Path: d.Path, Additions: d.Additions, Deletions: d.Deletions}
+			if d.Status == Renamed {
+				cf.OldPath = d.OldPath
+			}
+			p.commits[n-1].Files = append(p.commits[n-1].Files, cf)
 		}
 		if err := visit(d, strings.Join(p.section, "")); err != nil {
 			return nil, err
@@ -335,7 +347,9 @@ func (p *patchReader) gitFile(header string) (FileDiff, error) {
 			if err != nil {
 				return FileDiff{}, err
 			}
-			f.setPaths(line[4:], strings.TrimPrefix(plus, "+++ "))
+			// The header already named the paths without guessing at prefixes.
+			f.isNew = f.isNew || patchPath(line[4:]) == devNull
+			f.isDelete = f.isDelete || patchPath(strings.TrimPrefix(plus, "+++ ")) == devNull
 			return p.hunks(&f)
 		case strings.HasPrefix(line, "old mode "):
 			f.oldMode = line[len("old mode "):]
@@ -596,27 +610,51 @@ func stripPrefix(s string) string {
 	return s
 }
 
-// splitGitHeader recovers the two paths from "a/x b/x". Unquoted paths
-// containing spaces are only unambiguous when both sides are equal, which
-// holds for every header without a rename; renames also carry
-// "rename from/to" lines that override this.
+// splitGitHeader recovers the two paths from a "diff --git" line. git
+// writes them with a/ and b/, other one-letter prefixes under
+// diff.mnemonicPrefix, or none under diff.noprefix. Unquoted paths containing
+// spaces are only unambiguous when both sides name the same path, which holds
+// for every header without a rename; renames also carry "rename from/to"
+// lines that override this.
 func splitGitHeader(s string) (string, string) {
 	if strings.HasPrefix(s, `"`) {
 		if end := closingQuote(s); end > 0 {
-			a, b := s[:end+1], strings.TrimSpace(s[end+1:])
-			return stripPrefix(unquote(a)), stripPrefix(unquote(b))
+			return stripPrefixes(unquote(s[:end+1]), unquote(strings.TrimSpace(s[end+1:])))
 		}
 	}
 	for i := range len(s) {
 		if s[i] != ' ' {
 			continue
 		}
-		if a, b := stripPrefix(s[:i]), stripPrefix(s[i+1:]); a == b {
+		if a, b := stripPrefixes(s[:i], s[i+1:]); a == b {
 			return a, b
 		}
 	}
 	a, b, _ := strings.Cut(s, " ")
-	return stripPrefix(a), stripPrefix(unquote(b))
+	return stripPrefixes(a, unquote(b))
+}
+
+// stripPrefixes removes the prefixes from a header's two paths: none when the
+// paths are written the same, otherwise one from each side.
+func stripPrefixes(a, b string) (string, string) {
+	if a == b {
+		return a, b
+	}
+	ra, okA := cutHeaderPrefix(a)
+	rb, okB := cutHeaderPrefix(b)
+	if okA && okB {
+		return ra, rb
+	}
+	return a, b
+}
+
+// cutHeaderPrefix removes one of the prefixes git uses, a/ and b/ by default
+// or c/, i/, o/ and w/ for commit, index, object and work tree.
+func cutHeaderPrefix(s string) (string, bool) {
+	if len(s) > 2 && s[1] == '/' && strings.IndexByte("abciow", s[0]) >= 0 {
+		return s[2:], true
+	}
+	return s, false
 }
 
 func closingQuote(s string) int {

@@ -2,6 +2,7 @@ package review
 
 import (
 	"bytes"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -43,33 +44,22 @@ func groupOf(t *testing.T, o *Overview, path string) Group {
 	return Group{}
 }
 
-func TestGroupByCommit(t *testing.T) {
+func TestGroupIgnoresCommits(t *testing.T) {
 	o := analyzed(t,
 		mod("src/parse.go", 20, 5),
 		mod("src/parse_test.go", 30, 0),
 		mod("src/serve.go", 10, 2),
 		mod("README.md", 3, 1),
 	)
+	o.Group()
+	want := o.Groups
 	o.Commits = []Commit{
 		{Subject: "Add strict parsing", Files: []CommitFile{{Path: "src/parse.go", Additions: 18, Deletions: 5}, {Path: "src/parse_test.go", Additions: 30}, {Path: "README.md", Additions: 3, Deletions: 1}}},
 		{Subject: "Serve parsed input", Files: []CommitFile{{Path: "src/serve.go", Additions: 10, Deletions: 2}, {Path: "src/parse.go", Additions: 2}}},
 	}
 	o.Group()
-	want := []string{"Add strict parsing", "Serve parsed input", "Documentation"}
-	if got := groupTitles(o); !slices.Equal(got, want) {
-		t.Fatalf("titles = %q, want %q", got, want)
-	}
-	strict := o.Groups[0]
-	if !slices.Equal(strict.Files, []string{"src/parse.go", "src/parse_test.go"}) {
-		t.Errorf("strict parsing files = %q", strict.Files)
-	}
-	if !slices.Contains(strict.Summary, "Documented in README.md.") {
-		t.Errorf("summary = %q", strict.Summary)
-	}
-	for i, g := range o.Groups {
-		if g.ID != i+1 {
-			t.Errorf("group %d has id %d", i, g.ID)
-		}
+	if !reflect.DeepEqual(o.Groups, want) {
+		t.Fatalf("commit metadata changed groups: got %+v, want %+v", o.Groups, want)
 	}
 }
 
@@ -103,8 +93,8 @@ func TestGroupOrderFollowsLinks(t *testing.T) {
 	}
 	o.Links = []Link{{From: "ui/view.go", To: "core/model.go"}}
 	o.Group()
-	if got := groupTitles(o); !slices.Equal(got, []string{"Add model field", "Add view"}) {
-		t.Errorf("titles = %q, want the used code first", got)
+	if got := groupTitles(o); !slices.Equal(got, []string{"Changes to core/model.go and ui/view.go"}) {
+		t.Errorf("titles = %q, want linked files together", got)
 	}
 }
 
@@ -300,9 +290,8 @@ func TestRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"Branch strict\nmain...HEAD (aaaaaaaaaaaa..bbbbbbbbbbbb), 2 commits, 2 files, +21 -6\n",
-		"Commits\n\n  1111111 Add strict parsing\n  2222222 Tidy parser\n",
-		"Read in this order\n\n1. Add strict parsing  (1 file, +20 -5)\n",
+		"Branch strict\nmain...HEAD (aaaaaaaaaaaa..bbbbbbbbbbbb), 2 files, +21 -6\n",
+		"Read in this order\n\n1. Changes to src/parse.go  (1 file, +20 -5)\n",
 		"     M src/parse.go  +20 -5\n",
 		"Safe to skim\n\n2. Generated files  (1 file, +1 -1)\n   Generated (lockfile supplement): go.sum.\n",
 		"review show <number>",
@@ -318,8 +307,7 @@ func TestRender(t *testing.T) {
 	}
 	for _, want := range []string{
 		"## Branch strict\n\n",
-		"### Commits\n\n- Add strict parsing `1111111`\n",
-		"### Read in this order\n\n**1. Add strict parsing** (1 file, +20 -5)\n",
+		"### Read in this order\n\n**1. Changes to src/parse.go** (1 file, +20 -5)\n",
 		"- `src/parse.go` M +20 -5\n",
 	} {
 		if !strings.Contains(md.String(), want) {

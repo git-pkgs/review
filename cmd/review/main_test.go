@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -48,8 +49,8 @@ func TestOverviewText(t *testing.T) {
 	}
 	for _, want := range []string{
 		"topic\nmain...HEAD (",
-		"), 1 commit, 3 files, +5 -2\n",
-		"Read in this order\n\n1. topic  (2 files, +4 -1)\n" +
+		"), 3 files, +5 -2\n",
+		"Read in this order\n\n1. Changes to lib/new.go and lib/parse.go  (2 files, +4 -1)\n" +
 			"   Adds lib/new.go. Adds function `New`. Changes the body of function `Parse`. No test\n   files changed.\n" +
 			"     A lib/new.go    +3 -0\n     M lib/parse.go  +1 -1\n",
 		"Safe to skim\n\n2. Generated files  (1 file, +1 -1)\n   Generated (lockfile): package-lock.json.\n",
@@ -108,14 +109,14 @@ func TestOverviewFormats(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &o); err != nil {
 		t.Fatal(err)
 	}
-	if o.Range == nil || o.Range.MergeBase || o.Range.Head != "topic" || len(o.Files) != 3 || len(o.Groups) != 2 || len(o.Commits) != 1 {
+	if o.Range == nil || o.Range.MergeBase || o.Range.Head != "topic" || len(o.Files) != 3 || len(o.Groups) != 2 || len(o.Commits) != 0 {
 		t.Errorf("overview = %+v", o)
 	}
 	md, err := runCLI(t, "", "overview", "-C", r.Dir, "--format", "markdown", "main")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(md, "## topic\n") || !strings.Contains(md, "**1. topic** (2 files, +4 -1)") {
+	if !strings.HasPrefix(md, "## Branch topic\n") || !strings.Contains(md, "**1. Changes to lib/new.go and lib/parse.go** (2 files, +4 -1)") {
 		t.Errorf("markdown:\n%s", md)
 	}
 }
@@ -150,7 +151,7 @@ func TestShow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(out, "# 1. topic\ndiff --git a/lib/new.go b/lib/new.go\n") || strings.Contains(out, "package-lock.json") {
+	if !strings.HasPrefix(out, "# 1. Changes to lib/new.go and lib/parse.go\ndiff --git a/lib/new.go b/lib/new.go\n") || strings.Contains(out, "package-lock.json") {
 		t.Errorf("show output:\n%s", out)
 	}
 
@@ -284,87 +285,6 @@ func TestShowPatchKeepsModes(t *testing.T) {
 	}
 }
 
-func TestPatchSeriesWithRenameOnlyCommit(t *testing.T) {
-	r := gittest.New(t)
-	r.Write("a.go", "package a\n\nfunc A() {}\n")
-	r.Commit("base")
-	r.Git("mv", "a.go", "b.go")
-	r.Commit("rename file")
-	r.Write("b.go", "package a\n\nfunc B() {}\n")
-	r.Commit("change function")
-	patch := r.Git("format-patch", "--stdout", "HEAD~2..HEAD") + "\n"
-	out, err := runCLI(t, patch, "overview", "--patch", "-", "--json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var o review.Overview
-	if err := json.Unmarshal([]byte(out), &o); err != nil {
-		t.Fatal(err)
-	}
-	if len(o.Commits) != 2 || o.Commits[0].Subject != "rename file" || o.Commits[1].Subject != "change function" {
-		t.Fatalf("commits = %+v", o.Commits)
-	}
-	if len(o.Commits[0].Files) != 1 || len(o.Commits[1].Files) != 1 {
-		t.Errorf("commit files = %+v / %+v", o.Commits[0].Files, o.Commits[1].Files)
-	}
-}
-
-func TestPatchSeriesWithBinaryPatch(t *testing.T) {
-	r := gittest.New(t)
-	r.Write("a.go", "package a\n")
-	r.Write("logo.png", "\x89PNG\r\n\x1a\n\x00\x00\x00one")
-	r.Commit("base")
-	r.Write("logo.png", "\x89PNG\r\n\x1a\n\x00\x00\x00two and more bytes")
-	r.Commit("new logo")
-	r.Write("a.go", "package a\n\nfunc A() {}\n")
-	r.Commit("add A")
-	patch := r.Git("format-patch", "--binary", "--stdout", "HEAD~2..HEAD") + "\n"
-	if !strings.Contains(patch, "GIT binary patch") {
-		t.Fatal("fixture has no binary patch")
-	}
-	out, err := runCLI(t, patch, "overview", "--patch", "-", "--json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var o review.Overview
-	if err := json.Unmarshal([]byte(out), &o); err != nil {
-		t.Fatal(err)
-	}
-	if len(o.Commits) != 2 || len(o.Files) != 2 {
-		t.Fatalf("commits %+v, files %+v", o.Commits, o.Files)
-	}
-	for _, f := range o.Files {
-		if f.Path == "logo.png" && !f.Binary {
-			t.Error("logo.png not binary")
-		}
-		if f.Path == "a.go" && f.Additions != 2 {
-			t.Errorf("a.go = %+v", f)
-		}
-	}
-}
-
-func TestPatchSeriesRecreatedFile(t *testing.T) {
-	r := gittest.New(t)
-	r.Write("api.go", "package api\n\nfunc Old() {}\n")
-	r.Commit("base")
-	r.Git("rm", "-q", "api.go")
-	r.Commit("remove API")
-	r.Write("api.go", "package api\n\nfunc New() {}\n")
-	r.Commit("replace API")
-	patch := r.Git("format-patch", "--stdout", "HEAD~2..HEAD") + "\n"
-	out, err := runCLI(t, patch, "overview", "--patch", "-", "--json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var o review.Overview
-	if err := json.Unmarshal([]byte(out), &o); err != nil {
-		t.Fatal(err)
-	}
-	if len(o.Files) != 1 || o.Files[0].Status != review.Modified {
-		t.Errorf("files = %+v", o.Files)
-	}
-}
-
 func TestShowPatchKeepsNoNewlineMarkers(t *testing.T) {
 	r := gittest.New(t)
 	r.Write("data.txt", "before")
@@ -485,5 +405,102 @@ func TestInterruptWhileWaitingForPatch(t *testing.T) {
 		_ = cmd.Process.Kill()
 		<-done
 		t.Fatal("SIGINT didn't stop review while it waited for a patch on stdin")
+	}
+}
+
+func TestInterruptWhileReadingRepository(t *testing.T) {
+	r := branchRepo(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, args := range [][]string{{"overview", "-C", r.Dir, "main"}, {"show", "1", "-C", r.Dir, "main"}} {
+		err := run(ctx, args, strings.NewReader(""), io.Discard, io.Discard)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("%v: err = %v, want context.Canceled", args, err)
+		}
+	}
+}
+
+func TestPatchPrefixes(t *testing.T) {
+	r := gittest.New(t)
+	r.Write("a/lib.go", "package a\n")
+	r.Write("main.go", "package main\n")
+	r.Commit("base")
+	r.Write("a/lib.go", "package a\n\nfunc Lib() {}\n")
+	r.Write("main.go", "package main\n\nfunc main() {}\n")
+	r.Write("new.go", "package main\n")
+	r.Git("add", "-N", "new.go")
+	for _, config := range []string{"diff.mnemonicPrefix=false", "diff.mnemonicPrefix=true", "diff.noprefix=true"} {
+		for _, rev := range []string{"--", "HEAD"} {
+			patch := r.Git("-c", config, "diff", rev) + "\n"
+			out, err := runCLI(t, patch, "overview", "--patch", "-", "--json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var o review.Overview
+			if err := json.Unmarshal([]byte(out), &o); err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, f := range o.Files {
+				got = append(got, f.Path+" "+f.Status)
+			}
+			want := []string{"a/lib.go modified", "main.go modified", "new.go added"}
+			if !slices.Equal(got, want) {
+				t.Errorf("%s diff %s: files = %q, want %q", config, rev, got, want)
+			}
+		}
+	}
+}
+
+func TestOneLineBodyEditIsNotAnAddition(t *testing.T) {
+	r := gittest.New(t)
+	r.Write("a.go", "package a\n\nfunc Value() int { return 1 }\n")
+	r.Commit("base")
+	r.Write("a.go", "package a\n\nfunc Value() int { return 2 }\n\nfunc Other() int { return 3 }\n")
+	r.Commit("change value")
+	out, err := runCLI(t, "", "overview", "-C", r.Dir, "HEAD~1..HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Adds function `Other`. Changes the body of function `Value`.") {
+		t.Errorf("summary:\n%s", out)
+	}
+}
+
+func TestLongFunctionSignatureChange(t *testing.T) {
+	for name, parameter := range map[string]string{
+		"ASCII limit":    strings.Repeat("x", 250),
+		"UTF-8 boundary": strings.Repeat("x", 227) + "变量",
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := gittest.New(t)
+			declaration := "func Value(" + parameter + " int) "
+			r.Write("a.go", "package a\n\n"+declaration+"int { return 1 }\n")
+			r.Commit("base")
+			r.Write("a.go", "package a\n\n"+declaration+"int64 { return 1 }\n")
+			r.Commit("change return type")
+			out, err := runCLI(t, "", "overview", "-C", r.Dir, "HEAD~1..HEAD")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out, "Changes the declaration of function `Value`.") {
+				t.Errorf("summary:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestNewMethodOnAnotherClassIsAnAddition(t *testing.T) {
+	r := gittest.New(t)
+	r.Write("a.py", "class A:\n    def value(self):\n        return 1\n\nclass B:\n    pass\n")
+	r.Commit("base")
+	r.Write("a.py", "class A:\n    def value(self):\n        return 1\n\nclass B:\n    def value(self):\n        return 2\n")
+	r.Commit("add B.value")
+	out, err := runCLI(t, "", "overview", "-C", r.Dir, "HEAD~1..HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Adds function `value`.") {
+		t.Errorf("summary:\n%s", out)
 	}
 }

@@ -172,7 +172,7 @@ func assembleParts(files, anchors []*File, subject map[*File]*File, prefix strin
 
 // withParts splits a group's files into child groups when it is large, and
 // orders the children so parts others use come first.
-func (g *grouper) withParts(grp Group, files []*File, docs []*File) Group {
+func (g *grouper) withParts(grp Group, files []*File) Group {
 	parts, dirs, rest := splitParts(files)
 	if parts == nil {
 		return grp
@@ -182,7 +182,7 @@ func (g *grouper) withParts(grp Group, files []*File, docs []*File) Group {
 	add := func(part []*File, title string, rank int) {
 		slices.SortFunc(part, func(a, b *File) int { return strings.Compare(a.Path, b.Path) })
 		child := g.newGroup(grp.Kind, title, part)
-		child.Summary = append(changeSummary(part), g.docsSummary(part, docs)...)
+		child.Summary = changeSummary(part)
 		child.rank = rank
 		for _, f := range part {
 			partOf[f.Path] = len(children)

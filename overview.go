@@ -46,10 +46,11 @@ type Content struct {
 	Complete bool
 }
 
-// FileDiff is one changed file as a diff describes it. Base, Head and
-// Symbols are optional: without contents, classification is by path alone and
-// declarations are not compared; without Symbols, changes are described by
-// hunk context rather than by name.
+// FileDiff is one changed file as a diff describes it. Base, Head, Symbols
+// and BaseSymbols are optional: without contents, classification is by path
+// alone and declarations are not compared; without Symbols, changes are
+// described by hunk context rather than by name; without BaseSymbols, a
+// declaration whose every line changed is taken to be new.
 type FileDiff struct {
 	Path       string
 	OldPath    string
@@ -68,13 +69,19 @@ type FileDiff struct {
 	Base    *Content
 	Head    *Content
 	Symbols []Symbol
+	// BaseSymbols are the declarations in the base version.
+	BaseSymbols []Symbol
 }
 
-// Symbol is a declaration in the head version of a file, with one-based
-// inclusive line numbers.
+// Symbol is a declaration in one version of a file, with one-based inclusive
+// line numbers. Qualified names it within the file, such as "Store.load",
+// and Signature is its text up to any body, such as
+// "func (b *B) Load(x int) error".
 type Symbol struct {
 	Name      string `json:"name"`
+	Qualified string `json:"qualified,omitempty"`
 	Kind      string `json:"kind"`
+	Signature string `json:"signature,omitempty"`
 	StartLine int    `json:"start_line"`
 	EndLine   int    `json:"end_line"`
 	Exported  bool   `json:"exported,omitempty"`
@@ -109,9 +116,11 @@ type Commit struct {
 	Files   []CommitFile `json:"files,omitempty"`
 }
 
-// CommitFile is one path a commit changed and by how much.
+// CommitFile is one path a commit changed and by how much. OldPath is set
+// when the commit renamed it.
 type CommitFile struct {
 	Path      string `json:"path"`
+	OldPath   string `json:"old_path,omitempty"`
 	Additions int    `json:"additions"`
 	Deletions int    `json:"deletions"`
 }
@@ -156,11 +165,12 @@ type File struct {
 	literalFingerprint string
 }
 
-// Overview is the breakdown of one change. Callers fill Range, Branch,
-// Commits and Links as far as they know them, Add each file, then call Group.
+// Overview is the breakdown of one net diff. Callers fill Range, Branch and
+// Links as available, Add each file, then call Group.
 type Overview struct {
-	Range     *Range   `json:"range,omitempty"`
-	Branch    string   `json:"branch,omitempty"`
+	Range  *Range `json:"range,omitempty"`
+	Branch string `json:"branch,omitempty"`
+	// Commits is optional metadata; grouping and rendering use the net diff.
 	Commits   []Commit `json:"commits,omitempty"`
 	Files     []File   `json:"files"`
 	Links     []Link   `json:"links,omitempty"`

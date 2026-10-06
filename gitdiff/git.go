@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -34,12 +33,20 @@ const (
 func rootPathspec(p string) string { return ":(top,literal)" + p }
 
 type gitRunner struct {
-	dir string
+	dir  string
+	env  []string
+	args []string
+}
+
+func (g gitRunner) command(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", append(append([]string{}, g.args...), args...)...)
+	cmd.Dir = g.dir
+	cmd.Env = g.env
+	return cmd
 }
 
 func (g gitRunner) run(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = g.dir
+	cmd := g.command(ctx, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -213,21 +220,8 @@ var builtinDrivers = []string{
 // such as a file becoming a symlink, as two sections: a deletion and an
 // addition of the same path.
 func (g gitRunner) hunks(ctx context.Context, base, head string) (map[string][]review.Hunk, error) {
-	attrs, err := os.CreateTemp("", "review-attributes-*")
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = os.Remove(attrs.Name()) }()
-	_, err = attrs.WriteString(strings.Join(builtinDrivers, "\n") + "\n")
-	if closeErr := attrs.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return nil, err
-	}
-	args := append([]string{"-c", "core.attributesFile=" + attrs.Name(), gitDiff, "--unified=0", "--src-prefix=a/", "--dst-prefix=b/"}, diffFlags...)
-	cmd := exec.CommandContext(ctx, "git", append(args, base, head, "--")...)
-	cmd.Dir = g.dir
+	args := append([]string{gitDiff, "--unified=0", "--src-prefix=a/", "--dst-prefix=b/"}, diffFlags...)
+	cmd := g.command(ctx, append(args, base, head, "--")...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -257,8 +251,7 @@ type blobReader struct {
 }
 
 func (g gitRunner) blobs(ctx context.Context) (*blobReader, error) {
-	cmd := exec.CommandContext(ctx, "git", "cat-file", "--batch")
-	cmd.Dir = g.dir
+	cmd := g.command(ctx, "cat-file", "--batch")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -321,4 +314,20 @@ func (b *blobReader) request(oid string) (int64, error) {
 func (b *blobReader) close() error {
 	_ = b.stdin.Close()
 	return b.cmd.Wait()
+}
+
+// branch names the head when it is a branch, or the current branch when the
+// head is HEAD.
+func (g gitRunner) branch(ctx context.Context, head string) string {
+	if head == headRef {
+		out, err := g.run(ctx, "symbolic-ref", "--quiet", "--short", headRef)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if _, err := g.run(ctx, "show-ref", "--verify", "--quiet", "refs/heads/"+head); err == nil {
+		return head
+	}
+	return ""
 }

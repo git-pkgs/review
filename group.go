@@ -51,10 +51,7 @@ type Group struct {
 // Group partitions the files into groups in reading order, replacing any
 // earlier grouping.
 func (o *Overview) Group() {
-	g := grouper{o: o, byPath: map[string]*File{}}
-	for i := range o.Files {
-		g.byPath[o.Files[i].Path] = &o.Files[i]
-	}
+	g := grouper{o: o}
 	buckets := map[string][]*File{}
 	for i := range o.Files {
 		f := &o.Files[i]
@@ -64,7 +61,7 @@ func (o *Overview) Group() {
 
 	changed, parallel := g.splitParallel(buckets[GroupChange])
 	var groups []Group
-	groups = append(groups, g.changeGroups(changed, buckets[GroupDocs])...)
+	groups = append(groups, g.changeGroups(changed)...)
 	if docs := buckets[GroupDocs]; len(docs) > 0 {
 		groups = append(groups, g.roleGroup(GroupDocs, "Documentation", docs))
 	}
@@ -85,8 +82,7 @@ func (o *Overview) Group() {
 }
 
 type grouper struct {
-	o      *Overview
-	byPath map[string]*File
+	o *Overview
 }
 
 func has(f *File, role roles.Role) bool { return slices.Contains(f.Roles, role) }
@@ -179,44 +175,17 @@ func sortedValues(m map[string][]*File) [][]*File {
 	return out
 }
 
-// changeGroups splits code changes into groups. With two or more commits,
-// each file goes to the commit that changed it most, so a commit is an
-// intent and fixups fold into the commit they fix. Otherwise files are
-// joined by links between their changed code and by test naming, and
-// unlinked files in one directory are kept together.
-func (g *grouper) changeGroups(files, docs []*File) []Group {
-	if len(files) == 0 {
-		return nil
-	}
-	var comps [][]*File
-	var ranks []int
-	if len(g.o.Commits) > 1 {
-		comps, ranks = g.byCommit(files)
-	} else {
-		comps = g.byLinks(files)
-		ranks = make([]int, len(comps))
-	}
-
+// changeGroups joins linked code and tests, then groups remaining files by directory.
+func (g *grouper) changeGroups(files []*File) []Group {
+	comps := g.byLinks(files)
 	groups := make([]Group, 0, len(comps))
 	fileGroup := map[string]int{}
-	for i, comp := range comps {
+	for _, comp := range comps {
 		slices.SortFunc(comp, func(a, b *File) int { return strings.Compare(a.Path, b.Path) })
-		var title string
-		switch {
-		case len(g.o.Commits) > 1 && ranks[i] < len(g.o.Commits):
-			title = g.o.Commits[ranks[i]].Subject
-		case len(g.o.Commits) == 1 && len(comps) == 1:
-			title = g.o.Commits[0].Subject
-		default:
-			title = contentTitle(comp)
-		}
-		grp := g.newGroup(GroupChange, title, comp)
-		grp.Summary = append(changeSummary(comp), g.docsSummary(comp, docs)...)
-		grp = g.withParts(grp, comp, docs)
-		grp.rank = ranks[i]
-		if len(g.o.Commits) <= 1 {
-			grp.rank = -(grp.Additions + grp.Deletions)
-		}
+		grp := g.newGroup(GroupChange, contentTitle(comp), comp)
+		grp.Summary = changeSummary(comp)
+		grp = g.withParts(grp, comp)
+		grp.rank = -(grp.Additions + grp.Deletions)
 		for _, f := range comp {
 			fileGroup[f.Path] = len(groups)
 		}
@@ -224,41 +193,6 @@ func (g *grouper) changeGroups(files, docs []*File) []Group {
 	}
 	dedupeTitles(groups)
 	return g.order(groups, fileGroup)
-}
-
-// byCommit assigns each file to the commit with the most changed lines in it,
-// the earliest on a tie. Files no commit mentions fall back to links.
-func (g *grouper) byCommit(files []*File) ([][]*File, []int) {
-	assigned := map[int][]*File{}
-	var loose []*File
-	for _, f := range files {
-		best, bestLines := -1, -1
-		for ci, c := range g.o.Commits {
-			for _, cf := range c.Files {
-				if cf.Path == f.Path && cf.Additions+cf.Deletions > bestLines {
-					best, bestLines = ci, cf.Additions+cf.Deletions
-				}
-			}
-		}
-		if best < 0 {
-			loose = append(loose, f)
-			continue
-		}
-		assigned[best] = append(assigned[best], f)
-	}
-	var comps [][]*File
-	var ranks []int
-	for ci := range g.o.Commits {
-		if fs, ok := assigned[ci]; ok {
-			comps = append(comps, fs)
-			ranks = append(ranks, ci)
-		}
-	}
-	for _, comp := range g.byLinks(loose) {
-		comps = append(comps, comp)
-		ranks = append(ranks, len(g.o.Commits))
-	}
-	return comps, ranks
 }
 
 func (g *grouper) byLinks(files []*File) [][]*File {
@@ -315,22 +249,15 @@ func (g *grouper) byLinks(files []*File) [][]*File {
 
 func (g *grouper) newGroup(kind, title string, files []*File) Group {
 	grp := Group{Kind: kind, Title: title}
-	paths := map[string]bool{}
 	for _, f := range files {
 		grp.Files = append(grp.Files, f.Path)
 		grp.Additions += f.Additions
 		grp.Deletions += f.Deletions
-		paths[f.Path] = true
-	}
-	for _, c := range g.o.Commits {
-		if slices.ContainsFunc(c.Files, func(cf CommitFile) bool { return paths[cf.Path] }) {
-			grp.Commits = append(grp.Commits, c.Subject)
-		}
 	}
 	return grp
 }
 
-// contentTitle names a group after its files when no commit does.
+// contentTitle names a group after its files.
 func contentTitle(files []*File) string {
 	var main []string
 	tests := 0
