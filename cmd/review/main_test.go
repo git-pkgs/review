@@ -390,8 +390,8 @@ func TestInterruptWhileWaitingForPatch(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
 	time.Sleep(300 * time.Millisecond)
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatal(err)
