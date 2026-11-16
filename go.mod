@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/git-pkgs/manifests v0.14.0
 	github.com/git-pkgs/outline v0.2.3
-	github.com/git-pkgs/roles v0.1.3
+	github.com/git-pkgs/roles v0.1.4
 	github.com/spf13/cobra v1.10.2
 )
 
